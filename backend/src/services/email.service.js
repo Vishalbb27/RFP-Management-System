@@ -1,7 +1,7 @@
 const nodemailer = require("nodemailer");
 const Imap = require("imap");
 const { simpleParser } = require("mailparser");
-const { Vendor } = require("../models"); // ← MISSING!
+const { Vendor, Proposal } = require("../models");
 const proposalService = require("./proposal.service");
 
 class EmailService {
@@ -23,10 +23,6 @@ class EmailService {
       tlsOptions: { rejectUnauthorized: false },
     };
   }
-
-  /**
-   * Send RFP email to vendors
-   */
   async sendRFPToVendors(rfp, vendors) {
     const results = [];
 
@@ -61,9 +57,6 @@ class EmailService {
     return results;
   }
 
-  /**
-   * Generate professional RFP email body from structured RFP
-   */
   generateRFPEmailBody(rfp) {
     const { specifications, title } = rfp;
     const { items, budget, deliveryTerms, paymentTerms, warranty } =
@@ -169,17 +162,12 @@ class EmailService {
     return html;
   }
 
-  /**
-   * Poll IMAP inbox for new vendor responses
-   */
   async pollIncomingEmails() {
     console.log("🔍 Starting email poll...");
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const imap = new Imap(this.imapConfig);
 
     return new Promise(async (resolve, reject) => {
-      let processedCount = 0;
-      let totalEmails = 0;
       const proposals = [];
 
       imap.once("ready", () => {
@@ -188,28 +176,21 @@ class EmailService {
         imap.openBox("INBOX", false, (err, box) => {
           if (err) return reject(err);
 
-          // FIX: Combine search criteria into a single array structure if required by your lib version,
-          // or keep as is if it works. Standard node-imap usually expects: [['UNSEEN'], ['SINCE', oneDayAgo]]
           imap.search([["UNSEEN"], ["SINCE", oneDayAgo]], (err, results) => {
             if (err) return reject(err);
 
             const totalEmails = results?.length || 0;
-            console.log(`Found ${totalEmails} UNSEEN emails`);
+            console.log(`📬 Found ${totalEmails} UNSEEN emails`);
 
             if (totalEmails === 0) {
               imap.end();
               return resolve([]);
             }
 
-            // 1. OPTIMIZATION: Fetch ALL messages in ONE network request
-            // 'results' is already an array of UIDs/Sequences, e.g., [1, 2, 3]
             const f = imap.fetch(results, { bodies: "" });
-
             const processingPromises = [];
-            const proposals = [];
 
             f.on("message", (msg, seqno) => {
-              // Create a promise for each email's lifecycle (Buffer -> Parse -> DB)
               const emailTask = new Promise((resolveTask) => {
                 let buffer = Buffer.alloc(0);
 
@@ -221,10 +202,8 @@ class EmailService {
 
                 msg.once("end", async () => {
                   try {
-                    // 2. OPTIMIZATION: Process concurrently (don't block the next email fetch)
                     const parsed = await simpleParser(buffer);
 
-                    // Reuse your existing logic
                     const processedEmail = await this.processSingleEmail(
                       parsed
                     );
@@ -232,12 +211,16 @@ class EmailService {
                     if (processedEmail.proposal) {
                       proposals.push(processedEmail.proposal);
                     }
+
+                    imap.addFlags(seqno, "\\Seen", (err) => {
+                      if (err) console.error("❌ Failed to mark as seen:", err);
+                      else console.log(`📌 Email ${seqno} marked as SEEN`);
+                    });
                   } catch (err) {
                     console.error(
-                      `Failed processing email seq #${seqno}:`,
+                      `❌ Failed processing email seq #${seqno}:`,
                       err.message
                     );
-                    // Resolve anyway so one failure doesn't crash the whole batch
                   } finally {
                     resolveTask();
                   }
@@ -247,23 +230,19 @@ class EmailService {
               processingPromises.push(emailTask);
             });
 
-            f.once("error", (err) => {
-              console.error("Fetch error:", err);
-              reject(err);
-            });
-
-            // 'end' fires when the fetch request is done sending data
             f.once("end", async () => {
-              console.log(
-                "Done fetching. Waiting for parsing/DB operations to finish..."
-              );
+              console.log("⏳ Waiting for parsing & DB...");
 
-              // 3. Wait for all parallel tasks to complete
               await Promise.all(processingPromises);
 
-              console.log(`Processed ${proposals.length} valid proposals.`);
+              console.log(`✅ Processed ${proposals.length} valid proposals.`);
               imap.end();
               resolve(proposals);
+            });
+
+            f.once("error", (err) => {
+              console.error("❌ Fetch error:", err);
+              reject(err);
             });
           });
         });
@@ -274,29 +253,6 @@ class EmailService {
     });
   }
 
-  fetchSingleEmail(imap, emailNum) {
-    return new Promise((resolve, reject) => {
-      const f = imap.fetch(emailNum, { bodies: "" });
-      let buffer = Buffer.from("");
-
-      f.on("message", (msg) => {
-        msg.on("body", (stream) => {
-          stream.on(
-            "data",
-            (chunk) => (buffer = Buffer.concat([buffer, chunk]))
-          );
-        });
-
-        msg.once("end", () => {
-          simpleParser(buffer).then(resolve).catch(reject);
-        });
-      });
-
-      f.once("error", reject);
-    });
-  }
-
-  // ✅ HELPER: Process single email
   async processSingleEmail(parsed) {
     const fromEmail =
       parsed.from?.value?.[0]?.address || parsed.from?.text || "";
@@ -309,18 +265,30 @@ class EmailService {
     const rfpId = this.extractRfpId(parsed.subject);
     if (!rfpId) return { proposal: null };
 
+    const existing = await Proposal.findOne({
+      rfpId,
+      vendorId: vendor._id,
+    });
+
+    if (existing) {
+      console.log(
+        `⚠ Proposal already exists for vendor ${vendor.email} & RFP ${rfpId}. Skipping.`
+      );
+      return { proposal: null };
+    }
+
     const proposal = await proposalService.createFromEmail(
       parsed,
       rfpId,
       vendor._id
     );
+
     return { proposal };
   }
 
   extractRfpId(subject) {
     if (!subject) return null;
 
-    // ✅ Match 24-char ObjectId ANYWHERE in subject
     const objectIdMatch = subject.match(/[a-f0-9]{24}/i);
     if (objectIdMatch) {
       const potentialId = objectIdMatch[0];

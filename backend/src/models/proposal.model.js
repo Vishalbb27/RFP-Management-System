@@ -27,7 +27,7 @@ const ProposalSchema = new mongoose.Schema(
       {
         filename: String,
         mimeType: String,
-        content: Buffer, // or change to String if you store in S3 and save URL
+        content: Buffer, 
       },
     ],
 

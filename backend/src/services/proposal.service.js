@@ -13,28 +13,22 @@ const ollama = new Ollama({
 });
 
 class ProposalService {
-  /**
-   * Parse vendor email response into structured proposal data
-   */
   async createFromEmail(emailData, rfpId, vendorId) {
     try {
       console.log(`Creating proposal for RFP ${rfpId}`);
 
-      // 1. ✅ Use YOUR parseVendorEmailToProposal()
       const { parsedData } = await this.parseVendorEmailToProposal(
         vendorId || "",
         emailData.text || emailData.html || "",
         emailData.attachments || []
       );
 
-      // 2. Score proposal
       const RFP = require("../models/rfp.model");
       const rfp = await RFP.findById(rfpId);
       if (!rfp) throw new Error(`RFP ${rfpId} not found`);
 
       const scores = await this.scoreProposal(rfp, { parsedData });
 
-      // 3. ✅ Use YOUR createProposal() method!
       const proposal = await this.createProposal(
         rfpId,
         vendorId,
@@ -43,12 +37,10 @@ class ProposalService {
         parsedData
       );
 
-      // 4. Add scoring (update existing proposal)
       proposal.scoredByAI = scores;
       proposal.status = "evaluated";
       await proposal.save();
 
-      // 5. Update RFP
       rfp.proposals = rfp.proposals || [];
       if (!rfp.proposals.includes(proposal._id)) {
         rfp.proposals.push(proposal._id);
@@ -56,7 +48,6 @@ class ProposalService {
         await rfp.save();
       }
 
-      // 6. Update Vendor history
       const vendor = await Vendor.findById(vendorId);
       vendor.previousProposals = vendor.previousProposals || [];
       if (!vendor.previousProposals.includes(proposal._id)) {
@@ -74,19 +65,16 @@ class ProposalService {
 
   async parseVendorEmailToProposal(vendorId, emailContent, attachments = []) {
     try {
-      // Find vendor by email
       const vendor = await Vendor.findById(vendorId);
       if (!vendor) {
         throw new Error(`Vendor not found for ID: ${vendorId}`);
       }
 
-      // Extract content from email and attachments
       const fullContent = await this.extractEmailContent(
         emailContent,
         attachments
       );
 
-      // Use AI to parse the content
       const parsedData = await this.useAIToParseProposal(fullContent);
 
       return { vendor, parsedData };
@@ -96,13 +84,9 @@ class ProposalService {
     }
   }
 
-  /**
-   * Extract text from email and attachments
-   */
   async extractEmailContent(emailContent, attachments) {
     let content = emailContent;
 
-    // Add attachment file names and extracted text
     for (const attachment of attachments) {
       content += `\n\n[Attachment: ${attachment.filename}]`;
       if (attachment.contentType.includes("text")) {
@@ -113,9 +97,6 @@ class ProposalService {
     return content;
   }
 
-  /**
-   * Use AI to parse proposal from unstructured email content
-   */
   async useAIToParseProposal(emailContent) {
     const systemPrompt = `
 You are an expert at parsing vendor proposals from unstructured emails.
@@ -153,16 +134,6 @@ Return ONLY valid JSON with this structure:
 
     const userPrompt = `Parse this vendor proposal email:\n\n${emailContent}`;
 
-    // const response = await client.chat.completions.create({
-    //   model: process.env.LLM_MODEL || 'gpt-4',
-    //   messages: [
-    //     { role: 'system', content: systemPrompt },
-    //     { role: 'user', content: userPrompt }
-    //   ],
-    //   temperature: 0.1,
-    //   max_tokens: 2000
-    // });
-
     const response = await ollama.chat({
       model: process.env.LLM_MODEL || "llama3.1",
       messages: [
@@ -181,37 +152,38 @@ Return ONLY valid JSON with this structure:
     }
   }
 
-  /**
-   * Score a proposal against RFP requirements
-   */
   async scoreProposal(rfp, proposal) {
-    // Price score: lower is better (normalized against budget)
-    const priceScore = this.calculatePriceScore(
-      proposal.parsedData.pricing.totalPrice,
-      rfp.specifications.budget.total
+    const priceScore = this.clamp(
+      this.calculatePriceScore(
+        proposal.parsedData.pricing.totalPrice,
+        rfp.specifications.budget.total
+      )
     );
 
-    // Delivery score: meets deadline
-    const deliveryScore = this.calculateDeliveryScore(
-      proposal.parsedData.deliveryDetails,
-      rfp.specifications.deliveryTerms
+    const deliveryScore = this.clamp(
+      this.calculateDeliveryScore(
+        proposal.parsedData.deliveryDetails,
+        rfp.specifications.deliveryTerms
+      )
     );
 
-    // Compliance score: specs matched
-    const complianceScore = this.calculateComplianceScore(
-      proposal.parsedData.compliance,
-      rfp.specifications.items
+    const complianceScore = this.clamp(
+      this.calculateComplianceScore(
+        proposal.parsedData.compliance,
+        rfp.specifications.items
+      )
     );
 
-    // Support score
-    const supportScore = this.calculateSupportScore(proposal.parsedData.terms);
+    const supportScore = this.clamp(
+      this.calculateSupportScore(proposal.parsedData.terms)
+    );
 
-    // Overall weighted score
-    const overallScore =
+    const overallScore = this.clamp(
       priceScore * 0.3 +
-      deliveryScore * 0.25 +
-      complianceScore * 0.35 +
-      supportScore * 0.1;
+        deliveryScore * 0.25 +
+        complianceScore * 0.35 +
+        supportScore * 0.1
+    );
 
     return {
       priceScore: Math.round(priceScore),
@@ -227,39 +199,6 @@ Return ONLY valid JSON with this structure:
     };
   }
 
-  calculatePriceScore(proposedPrice, budgetTotal) {
-    if (proposedPrice > budgetTotal) return 30; // Way over budget
-    if (proposedPrice === budgetTotal) return 70; // At budget
-    return 100 - ((budgetTotal - proposedPrice) / budgetTotal) * 30; // Scaled based on savings
-  }
-
-  calculateDeliveryScore(deliveryDetails, deliveryTerms) {
-    // Estimate delivery score based on lead time vs requirement
-    const leadTimeDays = parseInt(deliveryDetails.leadTime) || 30;
-    const requiredDays = deliveryTerms.leadTimeDays || 30;
-
-    if (leadTimeDays <= requiredDays) return 100;
-    if (leadTimeDays > requiredDays * 1.5) return 30;
-    return 100 - ((leadTimeDays - requiredDays) / requiredDays) * 70;
-  }
-
-  calculateComplianceScore(compliance, requiredItems) {
-    const totalSpecs = requiredItems.length;
-    const matchedSpecs = compliance.specsMatched.length;
-    return (matchedSpecs / totalSpecs) * 100;
-  }
-
-  calculateSupportScore(terms) {
-    let score = 50;
-    if (terms.warranty.includes("24") || terms.warranty.includes("24/7"))
-      score += 30;
-    if (terms.sla) score += 20;
-    return Math.min(score, 100);
-  }
-
-  /**
-   * Create proposal record in database
-   */
   async createProposal(
     rfpId,
     vendorId,
@@ -281,9 +220,6 @@ Return ONLY valid JSON with this structure:
     return proposal;
   }
 
-  /**
-   * Get all proposals for an RFP
-   */
   async getProposalsByRFP(rfpId) {
     return Proposal.find({ rfpId })
       .populate("vendorId", "name email")

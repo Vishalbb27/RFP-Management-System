@@ -1,20 +1,24 @@
-// vendor.service.js
-const Vendor = require("../models/vendor.model"); // update path as per your structure
+
+const Vendor = require("../models/vendor.model");
 
 class VendorService {
-  // Create vendor
-  async create(data) {
-    const vendor = await Vendor.create(data);
-    return vendor;
+
+ async create(data) {
+  const existingVendor = await Vendor.findOne({ email: data.email });
+
+  if (existingVendor) {
+    throw new Error("Vendor with this email already exists.");
   }
 
-  // Get all vendors
+  const vendor = await Vendor.create(data);
+  return vendor;
+}
+
   async findAll(filters = {}) {
     const vendors = await Vendor.find(filters);
     return vendors;
   }
 
-  // Get vendor by ID
   async findById(id) {
     const vendor = await Vendor.findById(id);
     if (!vendor) {
@@ -25,7 +29,6 @@ class VendorService {
     return vendor;
   }
 
-  // Update vendor by ID
   async update(id, data) {
     const vendor = await Vendor.findByIdAndUpdate(id, data, {
       new: true,
@@ -41,7 +44,6 @@ class VendorService {
     return vendor;
   }
 
-  // Delete vendor
   async delete(id) {
     const vendor = await Vendor.findByIdAndDelete(id);
 

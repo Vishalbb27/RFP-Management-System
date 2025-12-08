@@ -3,7 +3,7 @@ const emailService = require("../services/email.service");
 
 exports.getProposalsByRfp = async (req, res, next) => {
   try {
-    const proposals = await proposalService.getByRfp(req.params.rfpId);
+    const proposals = await proposalService.getProposalsByRFP(req.params.rfpId);
     res.json({ proposals });
   } catch (error) {
     next(error);
@@ -12,13 +12,13 @@ exports.getProposalsByRfp = async (req, res, next) => {
 
 exports.pollEmails = async (req, res, next) => {
   try {
-    const proposals = await emailService.pollIncomingEmails();  // Now returns proposals!
-    // console.log(proposals)
+    const proposals = await emailService.pollIncomingEmails();
+
     res.json({
       success: true,
       message: `Created ${proposals.length} new proposals!`,
       newProposals: proposals.length,
-      proposals: proposals  // ✅ Send proposals back!
+      proposals: proposals 
     });
   } catch (error) {
     next(error);
